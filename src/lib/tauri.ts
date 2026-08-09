@@ -27,6 +27,24 @@ export interface DailyDataPoint {
   total_recv: number;
 }
 
+export interface Settings {
+  poll_interval_secs: number;
+  capture_interval_secs: number;
+  retention_days: number;
+  dark_mode: boolean;
+  notifications_enabled: boolean;
+  spike_threshold_mb: number;
+}
+
+export const DEFAULT_SETTINGS: Settings = {
+  poll_interval_secs: 2,
+  capture_interval_secs: 5,
+  retention_days: 7,
+  dark_mode: false,
+  notifications_enabled: true,
+  spike_threshold_mb: 100,
+};
+
 export async function getRealtimeUsage(): Promise<ProcessUsage[]> {
   return invoke<ProcessUsage[]>('get_realtime_usage');
 }
@@ -54,6 +72,18 @@ export async function getHistoryChart(
 
 export async function aggregateToday(): Promise<void> {
   return invoke<void>('aggregate_today');
+}
+
+export async function getSettings(): Promise<Settings> {
+  return invoke<Settings>('get_settings');
+}
+
+export async function updateSettings(settings: Settings): Promise<Settings> {
+  return invoke<Settings>('update_settings', { settings });
+}
+
+export async function isAdmin(): Promise<boolean> {
+  return invoke<boolean>('is_admin');
 }
 
 export function formatBytes(bytes: number): string {

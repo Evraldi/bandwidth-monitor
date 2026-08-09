@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import { MonthlySummary, getMonthlySummary, formatBytes } from '@/lib/tauri';
-import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip, Legend } from 'recharts';
+import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip } from 'recharts';
 
 const COLORS = [
   '#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6',
@@ -43,7 +43,6 @@ export default function MonthlyTab() {
   const totalUsage = totalSent + totalRecv;
 
   const currentYear = new Date().getFullYear();
-  const currentMonth = new Date().getMonth() + 1;
   const years = Array.from({ length: 5 }, (_, i) => currentYear - i);
   const months = [
     { value: 1, label: 'January' },
@@ -64,13 +63,13 @@ export default function MonthlyTab() {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-4">
-          <label className="text-sm font-medium text-gray-700">
+          <label className="text-sm font-medium text-gray-700 dark:text-gray-300">
             Select Period:
           </label>
           <select
             value={month}
             onChange={(e) => setMonth(Number(e.target.value))}
-            className="px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+            className="px-4 py-2 border border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
           >
             {months.map(m => (
               <option key={m.value} value={m.value}>
@@ -81,7 +80,7 @@ export default function MonthlyTab() {
           <select
             value={year}
             onChange={(e) => setYear(Number(e.target.value))}
-            className="px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+            className="px-4 py-2 border border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
           >
             {years.map(y => (
               <option key={y} value={y}>
@@ -94,11 +93,11 @@ export default function MonthlyTab() {
 
       {isLoading ? (
         <div className="flex items-center justify-center h-64">
-          <p className="text-gray-500">Loading monthly summary...</p>
+          <p className="text-gray-500 dark:text-gray-400">Loading monthly summary...</p>
         </div>
       ) : summaries.length === 0 ? (
-        <div className="flex items-center justify-center h-64 bg-gray-50 rounded-lg border border-gray-200">
-          <p className="text-gray-500">No data available for this month</p>
+        <div className="flex items-center justify-center h-64 bg-gray-50 dark:bg-gray-700 rounded-lg border border-gray-200 dark:border-gray-700">
+          <p className="text-gray-500 dark:text-gray-400">No data available for this month</p>
         </div>
       ) : (
         <>
@@ -117,8 +116,8 @@ export default function MonthlyTab() {
             </div>
           </div>
 
-          <div className="bg-white p-6 rounded-lg border border-gray-200">
-            <h3 className="text-lg font-semibold text-gray-900 mb-4">
+          <div className="bg-white dark:bg-gray-800 p-6 rounded-lg border border-gray-200 dark:border-gray-700">
+            <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100 mb-4">
               Top 10 Applications
             </h3>
             <ResponsiveContainer width="100%" height={300}>
@@ -142,46 +141,46 @@ export default function MonthlyTab() {
             </ResponsiveContainer>
           </div>
 
-          <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
-            <div className="px-6 py-4 bg-gray-50 border-b border-gray-200">
-              <h3 className="text-lg font-semibold text-gray-900">
+          <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 overflow-hidden">
+            <div className="px-6 py-4 bg-gray-50 dark:bg-gray-700 border-b border-gray-200 dark:border-gray-700">
+              <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100">
                 All Applications
               </h3>
             </div>
             <div className="overflow-x-auto">
-              <table className="min-w-full divide-y divide-gray-200">
-                <thead className="bg-gray-50">
+              <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
+                <thead className="bg-gray-50 dark:bg-gray-700">
                   <tr>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
                       #
                     </th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
                       Application
                     </th>
-                    <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
                       Sent
                     </th>
-                    <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
                       Received
                     </th>
-                    <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
                       Total
                     </th>
-                    <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
                       % of Total
                     </th>
                   </tr>
                 </thead>
-                <tbody className="bg-white divide-y divide-gray-200">
+                <tbody className="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
                   {summaries.map((proc, index) => {
                     const procTotal = proc.total_sent + proc.total_recv;
                     const percentage = (procTotal / totalUsage) * 100;
                     return (
-                      <tr key={proc.exe_name} className="hover:bg-gray-50">
-                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                      <tr key={proc.exe_name} className="hover:bg-gray-50 dark:hover:bg-gray-700 dark:bg-gray-700">
+                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
                           {index + 1}
                         </td>
-                        <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
+                        <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900 dark:text-gray-100">
                           {proc.exe_name}
                         </td>
                         <td className="px-6 py-4 whitespace-nowrap text-sm text-right text-blue-600">
@@ -190,10 +189,10 @@ export default function MonthlyTab() {
                         <td className="px-6 py-4 whitespace-nowrap text-sm text-right text-green-600">
                           {formatBytes(proc.total_recv)}
                         </td>
-                        <td className="px-6 py-4 whitespace-nowrap text-sm text-right font-medium text-gray-900">
+                        <td className="px-6 py-4 whitespace-nowrap text-sm text-right font-medium text-gray-900 dark:text-gray-100">
                           {formatBytes(procTotal)}
                         </td>
-                        <td className="px-6 py-4 whitespace-nowrap text-sm text-right text-gray-500">
+                        <td className="px-6 py-4 whitespace-nowrap text-sm text-right text-gray-500 dark:text-gray-400">
                           {percentage.toFixed(1)}%
                         </td>
                       </tr>

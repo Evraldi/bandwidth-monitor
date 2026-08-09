@@ -1,44 +1,88 @@
-use std::collections::HashMap;
-use sysinfo::{System, Pid, Networks};
-use crate::types::{ConnectionStats, ProcessSnapshot};
+use std::collections::{HashMap, HashSet};
+use sysinfo::{System, Pid};
+use crate::types::{ConnectionStats, ProcessSnapshot, ProcessUsage};
 
 #[cfg(windows)]
 use windows::Win32::NetworkManagement::IpHelper::{
-    GetExtendedTcpTable, MIB_TCPTABLE_OWNER_PID, TCP_TABLE_OWNER_PID_ALL,
-    GetExtendedUdpTable, MIB_UDPTABLE_OWNER_PID, UDP_TABLE_OWNER_PID,
+    GetExtendedTcpTable, GetPerTcp6ConnectionEStats, GetPerTcpConnectionEStats,
+    SetPerTcp6ConnectionEStats, SetPerTcpConnectionEStats,
+    MIB_TCP6ROW_OWNER_PID, MIB_TCP6TABLE_OWNER_PID,
+    MIB_TCPROW_OWNER_PID, MIB_TCPTABLE_OWNER_PID,
+    TCP_ESTATS_DATA_ROD_v0, TCP_ESTATS_DATA_RW_v0, TcpConnectionEstatsData,
+    TCP_TABLE_OWNER_PID_ALL,
 };
 #[cfg(windows)]
-use windows::Win32::Networking::WinSock::AF_INET;
+use windows::Win32::Networking::WinSock::{AF_INET, AF_INET6};
 #[cfg(windows)]
-use windows::Win32::Foundation::NO_ERROR;
+use windows::Win32::Foundation::{BOOLEAN, NO_ERROR};
+
+// MIB_TCP_STATE: only track connections that are at/after ESTABLISHED (5)
+// so we skip CLOSED, LISTEN, SYN_SENT, SYN_RCVD rows.
+#[cfg(windows)]
+const TCP_STATE_ESTABLISHED: u32 = 5;
+
+// Unique identity of a TCP connection (4-tuple). Ports are kept in the raw
+// network-byte-order values from the table; equality is all we need.
+#[cfg(windows)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum ConnKey {
+    V4 {
+        local_addr: u32,
+        local_port: u32,
+        remote_addr: u32,
+        remote_port: u32,
+    },
+    V6 {
+        local_addr: [u8; 16],
+        local_scope: u32,
+        local_port: u32,
+        remote_addr: [u8; 16],
+        remote_scope: u32,
+        remote_port: u32,
+    },
+}
+
+#[cfg(windows)]
+struct ConnStatsState {
+    pid: u32,
+    prev_bytes_in: u64,
+    prev_bytes_out: u64,
+}
 
 pub struct NetworkMonitor {
     system: System,
-    networks: Networks,
-    previous_system_totals: (u64, u64),
-    connection_count: HashMap<u32, u32>,
+    #[cfg(windows)]
+    connection_stats: HashMap<ConnKey, ConnStatsState>,
     session_totals: HashMap<u32, (u64, u64)>,
+}
+
+#[cfg(windows)]
+fn as_bytes<T: Sized>(val: &T) -> &[u8] {
+    unsafe { std::slice::from_raw_parts((val as *const T).cast::<u8>(), std::mem::size_of::<T>()) }
+}
+
+#[cfg(windows)]
+fn as_mut_bytes<T: Sized>(val: &mut T) -> &mut [u8] {
+    unsafe {
+        std::slice::from_raw_parts_mut((val as *mut T).cast::<u8>(), std::mem::size_of::<T>())
+    }
 }
 
 impl NetworkMonitor {
     pub fn new() -> Self {
         NetworkMonitor {
             system: System::new_all(),
-            networks: Networks::new_with_refreshed_list(),
-            previous_system_totals: (0, 0),
-            connection_count: HashMap::new(),
+            #[cfg(windows)]
+            connection_stats: HashMap::new(),
             session_totals: HashMap::new(),
         }
     }
 
     #[cfg(windows)]
-    pub fn poll(&mut self) -> HashMap<u32, ConnectionStats> {
-        let mut current_stats: HashMap<u32, ConnectionStats> = HashMap::new();
-        
+    fn snapshot_tcp4_rows() -> Option<Vec<MIB_TCPROW_OWNER_PID>> {
         unsafe {
             let mut size: u32 = 0;
-            
-            let _ = GetExtendedTcpTable(
+            GetExtendedTcpTable(
                 None,
                 &mut size,
                 false,
@@ -46,107 +90,258 @@ impl NetworkMonitor {
                 TCP_TABLE_OWNER_PID_ALL,
                 0,
             );
-
-            if size > 0 {
-                let mut buffer = vec![0u8; size as usize];
-                let result = GetExtendedTcpTable(
-                    Some(buffer.as_mut_ptr() as *mut _),
-                    &mut size,
-                    false,
-                    AF_INET.0 as u32,
-                    TCP_TABLE_OWNER_PID_ALL,
-                    0,
-                );
-
-                if result == NO_ERROR.0 {
-                    let table = &*(buffer.as_ptr() as *const MIB_TCPTABLE_OWNER_PID);
-                    let entries = std::slice::from_raw_parts(
-                        &table.table[0],
-                        table.dwNumEntries as usize,
-                    );
-
-                    for entry in entries {
-                        let pid = entry.dwOwningPid;
-                        if pid > 0 {
-                            *self.connection_count.entry(pid).or_insert(0) += 1;
-                        }
-                    }
-                }
+            if size == 0 {
+                return None;
             }
 
-            size = 0;
-            let _ = GetExtendedUdpTable(
-                None,
+            let mut buffer = vec![0u8; size as usize];
+            let result = GetExtendedTcpTable(
+                Some(buffer.as_mut_ptr() as *mut _),
                 &mut size,
                 false,
                 AF_INET.0 as u32,
-                UDP_TABLE_OWNER_PID,
+                TCP_TABLE_OWNER_PID_ALL,
                 0,
             );
+            if result != NO_ERROR.0 {
+                return None;
+            }
 
-            if size > 0 {
-                let mut buffer = vec![0u8; size as usize];
-                let result = GetExtendedUdpTable(
-                    Some(buffer.as_mut_ptr() as *mut _),
-                    &mut size,
-                    false,
-                    AF_INET.0 as u32,
-                    UDP_TABLE_OWNER_PID,
-                    0,
-                );
+            let table = &*(buffer.as_ptr() as *const MIB_TCPTABLE_OWNER_PID);
+            let rows = std::slice::from_raw_parts(
+                table.table.as_ptr(),
+                table.dwNumEntries as usize,
+            );
+            Some(rows.to_vec())
+        }
+    }
 
-                if result == NO_ERROR.0 {
-                    let table = &*(buffer.as_ptr() as *const MIB_UDPTABLE_OWNER_PID);
-                    let entries = std::slice::from_raw_parts(
-                        &table.table[0],
-                        table.dwNumEntries as usize,
-                    );
+    #[cfg(windows)]
+    fn snapshot_tcp6_rows() -> Option<Vec<MIB_TCP6ROW_OWNER_PID>> {
+        unsafe {
+            let mut size: u32 = 0;
+            GetExtendedTcpTable(
+                None,
+                &mut size,
+                false,
+                AF_INET6.0 as u32,
+                TCP_TABLE_OWNER_PID_ALL,
+                0,
+            );
+            if size == 0 {
+                return None;
+            }
 
-                    for entry in entries {
-                        let pid = entry.dwOwningPid;
-                        if pid > 0 {
-                            *self.connection_count.entry(pid).or_insert(0) += 1;
-                        }
-                    }
+            let mut buffer = vec![0u8; size as usize];
+            let result = GetExtendedTcpTable(
+                Some(buffer.as_mut_ptr() as *mut _),
+                &mut size,
+                false,
+                AF_INET6.0 as u32,
+                TCP_TABLE_OWNER_PID_ALL,
+                0,
+            );
+            if result != NO_ERROR.0 {
+                return None;
+            }
+
+            let table = &*(buffer.as_ptr() as *const MIB_TCP6TABLE_OWNER_PID);
+            let rows = std::slice::from_raw_parts(
+                table.table.as_ptr(),
+                table.dwNumEntries as usize,
+            );
+            Some(rows.to_vec())
+        }
+    }
+
+    #[cfg(windows)]
+    fn accumulate_delta(
+        key: &ConnKey,
+        pid: u32,
+        bytes_in: u64,
+        bytes_out: u64,
+        conn_stats: &mut HashMap<ConnKey, ConnStatsState>,
+        pid_deltas: &mut HashMap<u32, (u64, u64)>,
+    ) {
+        let mut delta_in = 0u64;
+        let mut delta_out = 0u64;
+
+        if let Some(prev) = conn_stats.get(key) {
+            // Only count deltas when the connection still belongs to the same
+            // PID; on a PID change treat it as a fresh connection (baseline).
+            if prev.pid == pid {
+                delta_in = bytes_in.saturating_sub(prev.prev_bytes_in);
+                delta_out = bytes_out.saturating_sub(prev.prev_bytes_out);
+            }
+        }
+
+        if delta_in > 0 || delta_out > 0 {
+            let entry = pid_deltas.entry(pid).or_insert((0, 0));
+            entry.0 += delta_in;
+            entry.1 += delta_out;
+        }
+
+        conn_stats.insert(
+            *key,
+            ConnStatsState {
+                pid,
+                prev_bytes_in: bytes_in,
+                prev_bytes_out: bytes_out,
+            },
+        );
+    }
+
+    #[cfg(windows)]
+    fn poll_connection(
+        row: *const MIB_TCPROW_OWNER_PID,
+        key: &ConnKey,
+        pid: u32,
+        conn_stats: &mut HashMap<ConnKey, ConnStatsState>,
+        pid_deltas: &mut HashMap<u32, (u64, u64)>,
+    ) {
+        unsafe {
+            // Enable extended data collection (idempotent, required once).
+            let rw = TCP_ESTATS_DATA_RW_v0 {
+                EnableCollection: BOOLEAN(1),
+            };
+            let set_result = SetPerTcpConnectionEStats(
+                row.cast(),
+                TcpConnectionEstatsData,
+                as_bytes(&rw),
+                0,
+                0,
+            );
+            if set_result != NO_ERROR.0 {
+                return; // Not elevated / unavailable -> no per-connection stats
+            }
+
+            // Read cumulative data bytes for this connection.
+            let mut rod = TCP_ESTATS_DATA_ROD_v0::default();
+            let get_result = GetPerTcpConnectionEStats(
+                row.cast(),
+                TcpConnectionEstatsData,
+                None,
+                0,
+                None,
+                0,
+                Some(as_mut_bytes(&mut rod)),
+                0,
+            );
+            if get_result != NO_ERROR.0 {
+                return;
+            }
+
+            Self::accumulate_delta(key, pid, rod.DataBytesIn, rod.DataBytesOut, conn_stats, pid_deltas);
+        }
+    }
+
+    #[cfg(windows)]
+    fn poll_connection6(
+        row: *const MIB_TCP6ROW_OWNER_PID,
+        key: &ConnKey,
+        pid: u32,
+        conn_stats: &mut HashMap<ConnKey, ConnStatsState>,
+        pid_deltas: &mut HashMap<u32, (u64, u64)>,
+    ) {
+        unsafe {
+            let rw = TCP_ESTATS_DATA_RW_v0 {
+                EnableCollection: BOOLEAN(1),
+            };
+            let set_result = SetPerTcp6ConnectionEStats(
+                row.cast(),
+                TcpConnectionEstatsData,
+                as_bytes(&rw),
+                0,
+                0,
+            );
+            if set_result != NO_ERROR.0 {
+                return;
+            }
+
+            let mut rod = TCP_ESTATS_DATA_ROD_v0::default();
+            let get_result = GetPerTcp6ConnectionEStats(
+                row.cast(),
+                TcpConnectionEstatsData,
+                None,
+                0,
+                None,
+                0,
+                Some(as_mut_bytes(&mut rod)),
+                0,
+            );
+            if get_result != NO_ERROR.0 {
+                return;
+            }
+
+            Self::accumulate_delta(key, pid, rod.DataBytesIn, rod.DataBytesOut, conn_stats, pid_deltas);
+        }
+    }
+
+    #[cfg(windows)]
+    pub fn poll(&mut self) -> HashMap<u32, ConnectionStats> {
+        let mut pid_deltas: HashMap<u32, (u64, u64)> = HashMap::new();
+        let mut seen_keys: HashSet<ConnKey> = HashSet::new();
+
+        if let Some(rows) = Self::snapshot_tcp4_rows() {
+            for row in &rows {
+                let pid = row.dwOwningPid;
+                if pid == 0 || row.dwState < TCP_STATE_ESTABLISHED {
+                    continue;
                 }
+                let key = ConnKey::V4 {
+                    local_addr: row.dwLocalAddr,
+                    local_port: row.dwLocalPort,
+                    remote_addr: row.dwRemoteAddr,
+                    remote_port: row.dwRemotePort,
+                };
+                Self::poll_connection(
+                    row,
+                    &key,
+                    pid,
+                    &mut self.connection_stats,
+                    &mut pid_deltas,
+                );
+                seen_keys.insert(key);
             }
         }
 
-        self.networks.refresh();
-        let mut total_received = 0u64;
-        let mut total_transmitted = 0u64;
-        
-        for (_interface_name, network) in &self.networks {
-            total_received += network.received();
-            total_transmitted += network.transmitted();
-        }
-
-        let (prev_sent, prev_recv) = self.previous_system_totals;
-        let delta_sent = total_transmitted.saturating_sub(prev_sent);
-        let delta_recv = total_received.saturating_sub(prev_recv);
-        
-        self.previous_system_totals = (total_transmitted, total_received);
-
-        let total_connections: u32 = self.connection_count.values().sum();
-        
-        if total_connections > 0 && (delta_sent > 0 || delta_recv > 0) {
-            for (pid, &conn_count) in &self.connection_count {
-                let weight = conn_count as f64 / total_connections as f64;
-                
-                let allocated_recv = (delta_recv as f64 * weight) as u64;
-                let allocated_sent = (delta_sent as f64 * weight) as u64;
-
-                current_stats.insert(*pid, ConnectionStats {
-                    pid: *pid,
-                    bytes_sent: allocated_sent,
-                    bytes_recv: allocated_recv,
-                });
+        if let Some(rows) = Self::snapshot_tcp6_rows() {
+            for row in &rows {
+                let pid = row.dwOwningPid;
+                if pid == 0 || row.dwState < TCP_STATE_ESTABLISHED {
+                    continue;
+                }
+                let key = ConnKey::V6 {
+                    local_addr: row.ucLocalAddr,
+                    local_scope: row.dwLocalScopeId,
+                    local_port: row.dwLocalPort,
+                    remote_addr: row.ucRemoteAddr,
+                    remote_scope: row.dwRemoteScopeId,
+                    remote_port: row.dwRemotePort,
+                };
+                Self::poll_connection6(
+                    row,
+                    &key,
+                    pid,
+                    &mut self.connection_stats,
+                    &mut pid_deltas,
+                );
+                seen_keys.insert(key);
             }
         }
 
-        self.connection_count.clear();
+        // Forget connections that disappeared (closed) so their next sighting
+        // is treated as a fresh baseline. The tail bytes of closed connections
+        // are intentionally not captured until an ETW-based approach is added.
+        self.connection_stats
+            .retain(|key, _| seen_keys.contains(key));
 
-        current_stats
+        pid_deltas
+            .into_iter()
+            .map(|(pid, (bytes_recv, bytes_sent))| {
+                (pid, ConnectionStats { bytes_sent, bytes_recv })
+            })
+            .collect()
     }
 
     #[cfg(not(windows))]
@@ -154,7 +349,11 @@ impl NetworkMonitor {
         HashMap::new()
     }
 
-    pub fn get_process_usage(&mut self) -> Vec<ProcessSnapshot> {
+    // Capture network deltas and accumulate session totals.
+    // Called ONLY by the background monitoring loop so that poll() state is
+    // never consumed twice. Snapshots carry per-poll deltas so database SUMs
+    // stay accurate.
+    pub fn capture(&mut self) -> Vec<ProcessSnapshot> {
         self.system.refresh_all();
         
         let current_stats = self.poll();
@@ -175,13 +374,11 @@ impl NetworkMonitor {
                 })
                 .or_insert((stats.bytes_sent, stats.bytes_recv));
 
-            let (total_sent, total_recv) = self.session_totals.get(&pid).copied().unwrap_or((0, 0));
-
             snapshots.push(ProcessSnapshot {
                 exe_name,
                 pid,
-                bytes_sent: total_sent,
-                bytes_recv: total_recv,
+                bytes_sent: stats.bytes_sent,
+                bytes_recv: stats.bytes_recv,
                 timestamp: now,
             });
         }
@@ -189,7 +386,32 @@ impl NetworkMonitor {
         snapshots
     }
 
-    pub fn get_session_totals(&self) -> &HashMap<u32, (u64, u64)> {
-        &self.session_totals
+    // Read-only view for the UI. Does NOT call poll(), so it never interferes
+    // with the capture loop's delta accounting.
+    pub fn get_realtime_processes(&mut self) -> Vec<ProcessUsage> {
+        self.system.refresh_all();
+
+        let mut usage_list = Vec::new();
+        for (pid, &(total_sent, total_recv)) in &self.session_totals {
+            if total_sent == 0 && total_recv == 0 {
+                continue;
+            }
+
+            let process = self.system.process(Pid::from_u32(*pid));
+            let exe_name = process
+                .map(|p| p.name().to_str().unwrap_or("Unknown").to_string())
+                .unwrap_or_else(|| format!("PID_{}", pid));
+
+            usage_list.push(ProcessUsage {
+                exe_name,
+                pid: *pid,
+                upload_bps: 0,
+                download_bps: 0,
+                total_sent,
+                total_recv,
+            });
+        }
+
+        usage_list
     }
 }

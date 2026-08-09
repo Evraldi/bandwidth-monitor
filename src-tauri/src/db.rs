@@ -1,7 +1,8 @@
 use rusqlite::{Connection, Result, params};
+use rusqlite::OptionalExtension;
 use chrono::{Local, NaiveDate};
 use std::path::PathBuf;
-use crate::types::{ProcessSnapshot, DailySummary, MonthlySummary, DailyDataPoint};
+use crate::types::{ProcessSnapshot, DailySummary, MonthlySummary, DailyDataPoint, Settings};
 
 pub struct Database {
     conn: Connection,
@@ -43,6 +44,14 @@ impl Database {
 
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_daily_date ON daily_summary(date)",
+            [],
+        )?;
+
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )",
             [],
         )?;
 
@@ -143,8 +152,20 @@ impl Database {
         let naive_date = NaiveDate::parse_from_str(date, "%Y-%m-%d")
             .map_err(|e| rusqlite::Error::InvalidParameterName(e.to_string()))?;
         
-        let start_ts = naive_date.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp();
-        let end_ts = naive_date.and_hms_opt(23, 59, 59).unwrap().and_utc().timestamp();
+        let start_ts = naive_date
+            .and_hms_opt(0, 0, 0)
+            .unwrap()
+            .and_local_timezone(Local)
+            .single()
+            .expect("invalid local start time")
+            .timestamp();
+        let end_ts = naive_date
+            .and_hms_opt(23, 59, 59)
+            .unwrap()
+            .and_local_timezone(Local)
+            .single()
+            .expect("invalid local end time")
+            .timestamp();
 
         // Aggregate snapshots into daily_summary
         self.conn.execute(
@@ -161,13 +182,43 @@ impl Database {
 
     pub fn cleanup_old_snapshots(&self, days_to_keep: u32) -> Result<()> {
         let cutoff_date = Local::now().naive_local().date() - chrono::Duration::days(days_to_keep as i64);
-        let cutoff_ts = cutoff_date.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp();
+        let cutoff_ts = cutoff_date
+            .and_hms_opt(0, 0, 0)
+            .unwrap()
+            .and_local_timezone(Local)
+            .single()
+            .expect("invalid local cutoff time")
+            .timestamp();
 
         self.conn.execute(
             "DELETE FROM usage_snapshots WHERE timestamp < ?1",
             params![cutoff_ts],
         )?;
 
+        Ok(())
+    }
+
+    pub fn get_settings(&self) -> Result<Settings> {
+        let value: Option<String> = self.conn.query_row(
+            "SELECT value FROM settings WHERE key = 'app'",
+            [],
+            |row| row.get(0),
+        ).optional()?;
+
+        match value {
+            Some(raw) => serde_json::from_str(&raw).or(Ok(Settings::default())),
+            None => Ok(Settings::default()),
+        }
+    }
+
+    pub fn save_settings(&self, settings: &Settings) -> Result<()> {
+        let raw = serde_json::to_string(settings).map_err(|e| {
+            rusqlite::Error::ToSqlConversionFailure(Box::new(e))
+        })?;
+        self.conn.execute(
+            "INSERT OR REPLACE INTO settings (key, value) VALUES ('app', ?1)",
+            params![raw],
+        )?;
         Ok(())
     }
 }

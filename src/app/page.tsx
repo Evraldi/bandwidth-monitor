@@ -12,7 +12,22 @@ type TabType = 'realtime' | 'history' | 'monthly' | 'settings';
 
 export default function Home() {
   const [activeTab, setActiveTab] = useState<TabType>('realtime');
+  // Lazy + keep-alive: a tab is only mounted the first time it's opened, then
+  // stays mounted (hidden) so switching back is instant and keeps its state.
+  const [visitedTabs, setVisitedTabs] = useState<Set<TabType>>(
+    () => new Set(['realtime'])
+  );
   const [adminStatus, setAdminStatus] = useState<boolean | null>(null);
+
+  const switchTab = (tab: TabType) => {
+    setActiveTab(tab);
+    setVisitedTabs((prev) => {
+      if (prev.has(tab)) return prev;
+      const next = new Set(prev);
+      next.add(tab);
+      return next;
+    });
+  };
 
   useEffect(() => {
     // Apply cached theme immediately to avoid a flash, then let the
@@ -83,7 +98,7 @@ export default function Home() {
             {tabs.map((tab) => (
               <button
                 key={tab.id}
-                onClick={() => setActiveTab(tab.id)}
+                onClick={() => switchTab(tab.id)}
                 className={`
                   flex items-center gap-2 px-6 py-4 font-medium text-sm transition-colors whitespace-nowrap
                   ${
@@ -99,12 +114,45 @@ export default function Home() {
             ))}
           </div>
 
-          {/* Tab Content */}
+          {/* Tab Content — keep-alive: render each visited tab once, hide
+              inactive ones so data isn't re-fetched on every switch */}
           <div className="p-6">
-            {activeTab === 'realtime' && <RealTimeTab />}
-            {activeTab === 'history' && <HistoryTab />}
-            {activeTab === 'monthly' && <MonthlyTab />}
-            {activeTab === 'settings' && <SettingsTab />}
+            {visitedTabs.has('realtime') && (
+              <div
+                className={`tab-panel ${
+                  activeTab === 'realtime' ? 'tab-panel-active' : ''
+                }`}
+              >
+                <RealTimeTab active={activeTab === 'realtime'} />
+              </div>
+            )}
+            {visitedTabs.has('history') && (
+              <div
+                className={`tab-panel ${
+                  activeTab === 'history' ? 'tab-panel-active' : ''
+                }`}
+              >
+                <HistoryTab />
+              </div>
+            )}
+            {visitedTabs.has('monthly') && (
+              <div
+                className={`tab-panel ${
+                  activeTab === 'monthly' ? 'tab-panel-active' : ''
+                }`}
+              >
+                <MonthlyTab />
+              </div>
+            )}
+            {visitedTabs.has('settings') && (
+              <div
+                className={`tab-panel ${
+                  activeTab === 'settings' ? 'tab-panel-active' : ''
+                }`}
+              >
+                <SettingsTab />
+              </div>
+            )}
           </div>
         </div>
 

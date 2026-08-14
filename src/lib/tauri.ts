@@ -1,4 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
+import { save } from '@tauri-apps/plugin-dialog';
 
 export interface ProcessUsage {
   exe_name: string;
@@ -70,6 +71,20 @@ export async function getHistoryChart(
   });
 }
 
+export async function getDailySummaryRange(
+  start: string,
+  end: string
+): Promise<DailySummary[]> {
+  return invoke<DailySummary[]>('get_daily_summary_range', { start, end });
+}
+
+export async function getMonthlyDailyTotals(
+  year: number,
+  month: number
+): Promise<DailyDataPoint[]> {
+  return invoke<DailyDataPoint[]>('get_monthly_daily_totals', { year, month });
+}
+
 export async function aggregateToday(): Promise<void> {
   return invoke<void>('aggregate_today');
 }
@@ -89,11 +104,40 @@ export async function isAdmin(): Promise<boolean> {
 export function formatBytes(bytes: number): string {
   if (bytes === 0) return '0 B';
   const k = 1024;
-  const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  const sizes = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
+  const i = Math.min(Math.floor(Math.log(bytes) / Math.log(k)), sizes.length - 1);
   return `${(bytes / Math.pow(k, i)).toFixed(2)} ${sizes[i]}`;
 }
 
 export function formatBytesPerSecond(bps: number): string {
   return `${formatBytes(bps)}/s`;
+}
+
+export function toCSV(rows: Record<string, string | number>[]): string {
+  const headers = rows.length > 0 ? Object.keys(rows[0]) : [];
+  const escape = (value: string | number) => {
+    const s = String(value);
+    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  };
+  const lines = [headers.map(escape).join(',')];
+  for (const row of rows) {
+    lines.push(headers.map((h) => escape(row[h])).join(','));
+  }
+  return lines.join('\n');
+}
+
+export async function exportData(
+  rows: Record<string, string | number>[],
+  defaultName: string,
+  kind: 'csv' | 'json'
+): Promise<boolean> {
+  if (rows.length === 0) return false;
+  const contents = kind === 'json' ? JSON.stringify(rows, null, 2) : toCSV(rows);
+  const path = await save({
+    defaultPath: defaultName,
+    filters: [{ name: kind.toUpperCase(), extensions: [kind] }],
+  });
+  if (!path) return false;
+  await invoke('write_export_file', { path, contents });
+  return true;
 }

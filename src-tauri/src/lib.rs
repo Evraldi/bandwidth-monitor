@@ -2,6 +2,8 @@ mod types;
 mod db;
 mod network_monitor;
 mod platform;
+#[cfg(windows)]
+mod etw;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -63,6 +65,26 @@ async fn get_history_chart(
 }
 
 #[tauri::command]
+async fn get_daily_summary_range(
+    start: String,
+    end: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<DailySummary>, String> {
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    db.get_daily_summary_range(&start, &end).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn get_monthly_daily_totals(
+    year: u32,
+    month: u32,
+    state: State<'_, AppState>,
+) -> Result<Vec<DailyDataPoint>, String> {
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    db.get_monthly_daily_totals(year, month).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 async fn aggregate_today(state: State<'_, AppState>) -> Result<(), String> {
     let db = state.db.lock().map_err(|e| e.to_string())?;
     let today = chrono::Local::now().format("%Y-%m-%d").to_string();
@@ -85,6 +107,11 @@ async fn update_settings(settings: Settings, state: State<'_, AppState>) -> Resu
 #[tauri::command]
 async fn is_admin() -> bool {
     platform::is_admin()
+}
+
+#[tauri::command]
+async fn write_export_file(path: String, contents: String) -> Result<(), String> {
+    std::fs::write(&path, contents).map_err(|e| e.to_string())
 }
 
 fn show_main_window<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) {
@@ -167,11 +194,9 @@ async fn monitoring_loop(
             mon.capture()
         };
 
-        // Save snapshots to database
+        // Save snapshots to database (batched in a single transaction)
         if let Ok(database) = db.lock() {
-            for snapshot in &snapshots {
-                let _ = database.insert_snapshot(snapshot);
-            }
+            let _ = database.insert_snapshots(&snapshots);
         }
 
         // Bandwidth spike notifications
@@ -223,7 +248,19 @@ async fn daily_aggregation_task(db: Arc<Mutex<Database>>) {
 pub fn run() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
+            // The main window is created hidden. It stays hidden in the system
+            // tray on every launch (manual, autostart, etc.) and is only
+            // revealed via the tray icon or its "Show" menu item.
+            #[cfg(desktop)]
+            app.handle().plugin(
+                tauri_plugin_autostart::init(
+                    tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+                    Some(vec!["--from-autostart"]),
+                ),
+            )?;
+
             if cfg!(debug_assertions) {
                 app.handle().plugin(
                     tauri_plugin_log::Builder::default()
@@ -306,10 +343,13 @@ pub fn run() {
             get_daily_summary,
             get_monthly_summary,
             get_history_chart,
+            get_daily_summary_range,
+            get_monthly_daily_totals,
             aggregate_today,
             get_settings,
             update_settings,
             is_admin,
+            write_export_file,
         ])
         .build(tauri::generate_context!())
         .expect("error while running tauri application");

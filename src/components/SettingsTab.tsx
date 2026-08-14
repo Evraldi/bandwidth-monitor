@@ -7,6 +7,7 @@ import {
   getSettings,
   updateSettings,
 } from '@/lib/tauri';
+import { enable, disable, isEnabled } from '@tauri-apps/plugin-autostart';
 import { applyDarkMode } from '@/lib/theme';
 
 type SaveState = 'idle' | 'saving' | 'saved' | 'error';
@@ -15,23 +16,37 @@ export default function SettingsTab() {
   const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS);
   const [isLoading, setIsLoading] = useState(true);
   const [saveState, setSaveState] = useState<SaveState>('idle');
+  const [autoLaunch, setAutoLaunch] = useState(false);
+  const [autoLaunchLoading, setAutoLaunchLoading] = useState(true);
 
   useEffect(() => {
     getSettings()
-      .then((s) => {
-        setSettings(s);
-        applyDarkMode(s.dark_mode);
-      })
+      .then((s) => setSettings(s))
       .catch((error) => {
         console.error('Failed to load settings:', error);
       })
       .finally(() => setIsLoading(false));
+
+    isEnabled()
+      .then(setAutoLaunch)
+      .catch(() => setAutoLaunch(false))
+      .finally(() => setAutoLaunchLoading(false));
   }, []);
 
   const update = <K extends keyof Settings>(key: K, value: Settings[K]) => {
-    setSettings((prev) => ({ ...prev, [key]: value }));
+    const next = { ...settings, [key]: value };
+    setSettings(next);
+
     if (key === 'dark_mode') {
       applyDarkMode(value as boolean);
+    }
+
+    // Toggles persist immediately so they survive tab switches and restarts
+    // without needing the Save button (which stays for the numeric fields).
+    if (key === 'dark_mode' || key === 'notifications_enabled') {
+      updateSettings(next).catch((error) => {
+        console.error('Failed to persist setting:', error);
+      });
     }
   };
 
@@ -46,6 +61,21 @@ export default function SettingsTab() {
       console.error('Failed to save settings:', error);
       setSaveState('error');
       setTimeout(() => setSaveState('idle'), 2500);
+    }
+  };
+
+  const toggleAutoLaunch = async () => {
+    const next = !autoLaunch;
+    setAutoLaunch(next);
+    try {
+      if (next) {
+        await enable();
+      } else {
+        await disable();
+      }
+    } catch (error) {
+      console.error('Failed to update autostart:', error);
+      setAutoLaunch(!next);
     }
   };
 
@@ -176,6 +206,43 @@ export default function SettingsTab() {
             'Spike notifications',
             'Show a desktop notification when a process hits the spike threshold.'
           )}
+        </div>
+      </div>
+
+      <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 overflow-hidden">
+        <div className="px-6 py-4 bg-gray-50 dark:bg-gray-700 border-b border-gray-200 dark:border-gray-600">
+          <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100">
+            General
+          </h3>
+        </div>
+        <div className="px-6 divide-y divide-gray-200 dark:divide-gray-700">
+          <div className="flex items-start justify-between gap-8 py-4">
+            <div>
+              <div className="text-sm font-medium text-gray-900 dark:text-gray-100">
+                Launch at login
+              </div>
+              <div className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                Start Bandwidth Monitor automatically when you sign in to
+                Windows.
+              </div>
+            </div>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={autoLaunch}
+              disabled={autoLaunchLoading}
+              onClick={toggleAutoLaunch}
+              className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50 ${
+                autoLaunch ? 'bg-blue-600' : 'bg-gray-300 dark:bg-gray-600'
+              }`}
+            >
+              <span
+                className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                  autoLaunch ? 'translate-x-6' : 'translate-x-1'
+                }`}
+              />
+            </button>
+          </div>
         </div>
       </div>
 

@@ -11,7 +11,13 @@ pub struct Database {
 impl Database {
     pub fn new(db_path: PathBuf) -> Result<Self> {
         let conn = Connection::open(db_path)?;
-        
+
+        // WAL + synchronous NORMAL: much faster for the snapshot-heavy insert
+        // pattern while keeping crash-safety (and letting readers/History
+        // queries run without blocking on the writer).
+        conn.pragma_update(None, "journal_mode", "WAL")?;
+        conn.pragma_update(None, "synchronous", "NORMAL")?;
+
         // Create tables if they don't exist
         conn.execute(
             "CREATE TABLE IF NOT EXISTS usage_snapshots (
@@ -48,6 +54,11 @@ impl Database {
         )?;
 
         conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_daily_exe_date ON daily_summary(exe_name, date)",
+            [],
+        )?;
+
+        conn.execute(
             "CREATE TABLE IF NOT EXISTS settings (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
@@ -58,19 +69,30 @@ impl Database {
         Ok(Database { conn })
     }
 
-    pub fn insert_snapshot(&self, snapshot: &ProcessSnapshot) -> Result<()> {
-        self.conn.execute(
-            "INSERT INTO usage_snapshots (timestamp, exe_name, pid, bytes_sent, bytes_recv)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![
-                snapshot.timestamp,
-                snapshot.exe_name,
-                snapshot.pid,
-                snapshot.bytes_sent,
-                snapshot.bytes_recv
-            ],
-        )?;
-        Ok(())
+    pub fn insert_snapshots(&self, snapshots: &[ProcessSnapshot]) -> Result<()> {
+        if snapshots.is_empty() {
+            return Ok(());
+        }
+
+        // Single transaction per batch (one capture cycle) instead of one
+        // autocommit insert per row — the main write throughput win.
+        let tx = self.conn.unchecked_transaction()?;
+        {
+            let mut stmt = tx.prepare(
+                "INSERT INTO usage_snapshots (timestamp, exe_name, pid, bytes_sent, bytes_recv)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+            )?;
+            for snapshot in snapshots {
+                stmt.execute(params![
+                    snapshot.timestamp,
+                    snapshot.exe_name,
+                    snapshot.pid,
+                    snapshot.bytes_sent,
+                    snapshot.bytes_recv
+                ])?;
+            }
+        }
+        tx.commit()
     }
 
     pub fn get_daily_summary(&self, date: &str) -> Result<Vec<DailySummary>> {
@@ -142,6 +164,63 @@ impl Database {
                 })
             }
         )?
+        .collect::<Result<Vec<_>>>()?;
+
+        Ok(data_points)
+    }
+
+    pub fn get_daily_summary_range(
+        &self,
+        start: &str,
+        end: &str,
+    ) -> Result<Vec<DailySummary>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT exe_name, SUM(total_sent), SUM(total_recv)
+             FROM daily_summary
+             WHERE date >= ?1 AND date <= ?2
+             GROUP BY exe_name
+             ORDER BY (SUM(total_sent) + SUM(total_recv)) DESC"
+        )?;
+
+        let summaries = stmt.query_map(params![start, end], |row| {
+            Ok(DailySummary {
+                exe_name: row.get(0)?,
+                total_sent: row.get(1)?,
+                total_recv: row.get(2)?,
+            })
+        })?
+        .collect::<Result<Vec<_>>>()?;
+
+        Ok(summaries)
+    }
+
+    pub fn get_monthly_daily_totals(
+        &self,
+        year: u32,
+        month: u32,
+    ) -> Result<Vec<DailyDataPoint>> {
+        let start_date = format!("{:04}-{:02}-01", year, month);
+        let end_date = if month == 12 {
+            format!("{:04}-01-01", year + 1)
+        } else {
+            format!("{:04}-{:02}-01", year, month + 1)
+        };
+
+        let mut stmt = self.conn.prepare(
+            "SELECT date, SUM(total_sent), SUM(total_recv)
+             FROM daily_summary
+             WHERE date >= ?1 AND date < ?2
+             GROUP BY date
+             ORDER BY date ASC"
+        )?;
+
+        let data_points = stmt.query_map(params![start_date, end_date], |row| {
+            Ok(DailyDataPoint {
+                date: row.get(0)?,
+                total_sent: row.get(1)?,
+                total_recv: row.get(2)?,
+            })
+        })?
         .collect::<Result<Vec<_>>>()?;
 
         Ok(data_points)

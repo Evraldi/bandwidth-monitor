@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { DailySummary, getDailySummary, formatBytes, aggregateToday } from '@/lib/tauri';
+import { DailySummary, getDailySummaryRange, formatBytes, aggregateToday, exportData } from '@/lib/tauri';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 
 function formatLocalDate(d: Date): string {
@@ -12,7 +12,10 @@ function formatLocalDate(d: Date): string {
 }
 
 export default function HistoryTab() {
-  const [date, setDate] = useState(() => formatLocalDate(new Date()));
+  const [fromDate, setFromDate] = useState(() =>
+    formatLocalDate(new Date(Date.now() - 6 * 86400000))
+  );
+  const [toDate, setToDate] = useState(() => formatLocalDate(new Date()));
   const [summaries, setSummaries] = useState<DailySummary[]>([]);
   const [isLoading, setIsLoading] = useState(true);
 
@@ -23,10 +26,11 @@ export default function HistoryTab() {
         // Re-aggregate today's snapshots so History is fresh without waiting
         // for the midnight summarizer. aggregate_daily is idempotent, so this
         // is safe to run on every visit.
-        if (date === formatLocalDate(new Date())) {
+        const todayStr = formatLocalDate(new Date());
+        if (fromDate <= todayStr && todayStr <= toDate) {
           await aggregateToday();
         }
-        const data = await getDailySummary(date);
+        const data = await getDailySummaryRange(fromDate, toDate);
         setSummaries(data);
       } catch (error) {
         console.error('Failed to fetch daily summary:', error);
@@ -36,7 +40,7 @@ export default function HistoryTab() {
     };
 
     fetchData();
-  }, [date]);
+  }, [fromDate, toDate]);
 
   const chartData = summaries.slice(0, 10).map(proc => ({
     name: proc.exe_name.length > 20 
@@ -50,27 +54,64 @@ export default function HistoryTab() {
   const totalSent = summaries.reduce((acc, proc) => acc + proc.total_sent, 0);
   const totalRecv = summaries.reduce((acc, proc) => acc + proc.total_recv, 0);
 
+  const handleExport = (kind: 'csv' | 'json') => {
+    const rows = summaries.map((proc) => ({
+      exe_name: proc.exe_name,
+      total_sent: proc.total_sent,
+      total_recv: proc.total_recv,
+    }));
+    const defaultName = `bandwidth_${fromDate}_${toDate}.${kind}`;
+    exportData(rows, defaultName, kind).catch((e) => console.error('Export failed:', e));
+  };
+
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-4">
+      <div className="flex flex-wrap items-center justify-between gap-4">
+        <div className="flex flex-wrap items-center gap-4">
           <label className="text-sm font-medium text-gray-700 dark:text-gray-300">
-            Select Date:
+            From:
           </label>
           <input
             type="date"
-            value={date}
-            onChange={(e) => setDate(e.target.value)}
+            value={fromDate}
+            onChange={(e) => setFromDate(e.target.value)}
+            max={toDate}
+            className="px-4 py-2 border border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+          />
+          <label className="text-sm font-medium text-gray-700 dark:text-gray-300">
+            To:
+          </label>
+          <input
+            type="date"
+            value={toDate}
+            onChange={(e) => setToDate(e.target.value)}
+            min={fromDate}
             max={formatLocalDate(new Date())}
             className="px-4 py-2 border border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
           />
         </div>
         
         {!isLoading && summaries.length > 0 && (
-          <div className="text-sm text-gray-600">
-            <span className="font-medium">Total:</span>{' '}
-            <span className="text-blue-600">{formatBytes(totalSent)}</span> sent •{' '}
-            <span className="text-green-600">{formatBytes(totalRecv)}</span> received
+          <div className="flex flex-wrap items-center gap-3">
+            <div className="text-sm text-gray-600 dark:text-gray-400">
+              <span className="font-medium">Total:</span>{' '}
+              <span className="text-blue-600">{formatBytes(totalSent)}</span> sent •{' '}
+              <span className="text-green-600">{formatBytes(totalRecv)}</span> received
+            </div>
+            <div className="flex gap-2">
+              <button
+                onClick={() => handleExport('csv')}
+                className="px-3 py-1.5 text-sm font-medium text-gray-700 dark:text-gray-200 border border-gray-300 dark:border-gray-600 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700"
+              >
+                Export CSV
+              </button>
+              <button
+                onClick={() => handleExport('json')}
+                className="px-3 py-1.5 text-sm font-medium text-gray-700 dark:text-gray-200 border border-gray-300 dark:border-gray-600 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700"
+              >
+                Export JSON
+              </button>
+            </div>
           </div>
         )}
       </div>
@@ -138,7 +179,7 @@ export default function HistoryTab() {
                 </thead>
                 <tbody className="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
                   {summaries.map((proc, index) => (
-                    <tr key={proc.exe_name} className="hover:bg-gray-50 dark:hover:bg-gray-700 dark:bg-gray-700">
+                    <tr key={proc.exe_name} className="hover:bg-gray-50 dark:hover:bg-gray-700">
                       <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
                         {index + 1}
                       </td>

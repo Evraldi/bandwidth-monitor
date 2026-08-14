@@ -1,6 +1,9 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex};
 use sysinfo::{System, Pid};
 use crate::types::{ConnectionStats, ProcessSnapshot, ProcessUsage};
+#[cfg(windows)]
+use crate::etw::TrafficCollector;
 
 #[cfg(windows)]
 use windows::Win32::NetworkManagement::IpHelper::{
@@ -51,9 +54,23 @@ struct ConnStatsState {
 
 pub struct NetworkMonitor {
     system: System,
+    // True when the ETW TCP+UDP collector is running; capture() then uses the
+    // continuous ETW totals. When false it falls back to per-connection TCP
+    // EStats polling (which loses the tail bytes of closed connections).
+    #[cfg(windows)]
+    etw_active: bool,
     #[cfg(windows)]
     connection_stats: HashMap<ConnKey, ConnStatsState>,
     session_totals: HashMap<u32, (u64, u64)>,
+    // Cumulative per-PID (sent, recv) TCP+UDP bytes fed by the ETW collector.
+    #[cfg(windows)]
+    etw_totals: Arc<Mutex<HashMap<u32, (u64, u64)>>>,
+    // Snapshot of etw_totals taken at the last capture, for delta accounting.
+    #[cfg(windows)]
+    etw_prev: HashMap<u32, (u64, u64)>,
+    // Stops the ETW session when the monitor is dropped.
+    #[cfg(windows)]
+    _etw_collector: Option<TrafficCollector>,
 }
 
 #[cfg(windows)]
@@ -70,11 +87,31 @@ fn as_mut_bytes<T: Sized>(val: &mut T) -> &mut [u8] {
 
 impl NetworkMonitor {
     pub fn new() -> Self {
+        #[cfg(windows)]
+        let (etw_totals, etw_collector, etw_active) = {
+            let totals = Arc::new(Mutex::new(HashMap::new()));
+            match TrafficCollector::start(totals.clone()) {
+                Ok(c) => (totals, Some(c), true),
+                Err(e) => {
+                    log::warn!("ETW capture unavailable (falling back to TCP EStats polling): {e}");
+                    (totals, None, false)
+                }
+            }
+        };
+
         NetworkMonitor {
             system: System::new_all(),
             #[cfg(windows)]
+            etw_active,
+            #[cfg(windows)]
             connection_stats: HashMap::new(),
             session_totals: HashMap::new(),
+            #[cfg(windows)]
+            etw_totals,
+            #[cfg(windows)]
+            etw_prev: HashMap::new(),
+            #[cfg(windows)]
+            _etw_collector: etw_collector,
         }
     }
 
@@ -355,30 +392,63 @@ impl NetworkMonitor {
     // stay accurate.
     pub fn capture(&mut self) -> Vec<ProcessSnapshot> {
         self.system.refresh_all();
-        
-        let current_stats = self.poll();
-        let now = chrono::Local::now().timestamp();
-        let mut snapshots = Vec::new();
 
-        for (pid, stats) in current_stats {
+        let now = chrono::Local::now().timestamp();
+
+        let mut pid_deltas: HashMap<u32, (u64, u64)> = HashMap::new();
+
+        #[cfg(windows)]
+        if self.etw_active {
+            // ETW path: continuous per-segment accounting for TCP+UDP. Nothing
+            // is lost when connections close between polls, so totals are not
+            // biased by the capture interval.
+            let etw_totals = self.etw_totals.lock().map(|m| m.clone()).unwrap_or_default();
+            for (pid, &(sent, recv)) in &etw_totals {
+                // First sighting only establishes the baseline; the delta is
+                // counted from the next capture onward.
+                if let Some(&(prev_sent, prev_recv)) = self.etw_prev.get(pid) {
+                    let d_sent = sent.saturating_sub(prev_sent);
+                    let d_recv = recv.saturating_sub(prev_recv);
+                    if d_sent > 0 || d_recv > 0 {
+                        pid_deltas.insert(*pid, (d_sent, d_recv));
+                    }
+                }
+            }
+            self.etw_prev = etw_totals;
+        } else {
+            // Fallback: per-connection TCP EStats polling. Lossy — the tail
+            // bytes of connections that close between polls are not captured.
+            for (pid, stats) in self.poll() {
+                let entry = pid_deltas.entry(pid).or_insert((0, 0));
+                entry.0 += stats.bytes_sent;
+                entry.1 += stats.bytes_recv;
+            }
+        }
+
+        let mut snapshots = Vec::new();
+        for (pid, (bytes_sent, bytes_recv)) in pid_deltas {
+            if bytes_sent == 0 && bytes_recv == 0 {
+                continue;
+            }
+
             let process = self.system.process(Pid::from_u32(pid));
             let exe_name = process
                 .map(|p| p.name().to_str().unwrap_or("Unknown").to_string())
                 .unwrap_or_else(|| format!("PID_{}", pid));
 
-            // stats already contains deltas from poll(), just add directly to session totals
+            // Add combined TCP+UDP deltas to session totals.
             self.session_totals.entry(pid)
                 .and_modify(|(sent, recv)| {
-                    *sent += stats.bytes_sent;
-                    *recv += stats.bytes_recv;
+                    *sent += bytes_sent;
+                    *recv += bytes_recv;
                 })
-                .or_insert((stats.bytes_sent, stats.bytes_recv));
+                .or_insert((bytes_sent, bytes_recv));
 
             snapshots.push(ProcessSnapshot {
                 exe_name,
                 pid,
-                bytes_sent: stats.bytes_sent,
-                bytes_recv: stats.bytes_recv,
+                bytes_sent,
+                bytes_recv,
                 timestamp: now,
             });
         }

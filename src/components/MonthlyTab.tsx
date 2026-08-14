@@ -1,8 +1,8 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { MonthlySummary, getMonthlySummary, formatBytes } from '@/lib/tauri';
-import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip } from 'recharts';
+import { MonthlySummary, DailyDataPoint, getMonthlySummary, getMonthlyDailyTotals, formatBytes, exportData } from '@/lib/tauri';
+import { PieChart, Pie, Cell, LineChart, Line, CartesianGrid, XAxis, YAxis, ResponsiveContainer, Tooltip, Legend } from 'recharts';
 
 const COLORS = [
   '#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6',
@@ -13,14 +13,19 @@ export default function MonthlyTab() {
   const [year, setYear] = useState(() => new Date().getFullYear());
   const [month, setMonth] = useState(() => new Date().getMonth() + 1);
   const [summaries, setSummaries] = useState<MonthlySummary[]>([]);
+  const [dailyTotals, setDailyTotals] = useState<DailyDataPoint[]>([]);
   const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
     const fetchData = async () => {
       setIsLoading(true);
       try {
-        const data = await getMonthlySummary(year, month);
+        const [data, totals] = await Promise.all([
+          getMonthlySummary(year, month),
+          getMonthlyDailyTotals(year, month),
+        ]);
         setSummaries(data);
+        setDailyTotals(totals);
       } catch (error) {
         console.error('Failed to fetch monthly summary:', error);
       } finally {
@@ -41,6 +46,22 @@ export default function MonthlyTab() {
   const totalSent = summaries.reduce((acc, proc) => acc + proc.total_sent, 0);
   const totalRecv = summaries.reduce((acc, proc) => acc + proc.total_recv, 0);
   const totalUsage = totalSent + totalRecv;
+
+  const trendData = dailyTotals.map((d) => ({
+    day: d.date.slice(8),
+    sent: d.total_sent,
+    recv: d.total_recv,
+  }));
+
+  const handleExport = (kind: 'csv' | 'json') => {
+    const rows = summaries.map((proc) => ({
+      exe_name: proc.exe_name,
+      total_sent: proc.total_sent,
+      total_recv: proc.total_recv,
+    }));
+    const defaultName = `bandwidth_${year}-${String(month).padStart(2, '0')}.${kind}`;
+    exportData(rows, defaultName, kind).catch((e) => console.error('Export failed:', e));
+  };
 
   const currentYear = new Date().getFullYear();
   const years = Array.from({ length: 5 }, (_, i) => currentYear - i);
@@ -89,6 +110,22 @@ export default function MonthlyTab() {
             ))}
           </select>
         </div>
+        {!isLoading && summaries.length > 0 && (
+          <div className="flex gap-2">
+            <button
+              onClick={() => handleExport('csv')}
+              className="px-3 py-1.5 text-sm font-medium text-gray-700 dark:text-gray-200 border border-gray-300 dark:border-gray-600 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700"
+            >
+              Export CSV
+            </button>
+            <button
+              onClick={() => handleExport('json')}
+              className="px-3 py-1.5 text-sm font-medium text-gray-700 dark:text-gray-200 border border-gray-300 dark:border-gray-600 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700"
+            >
+              Export JSON
+            </button>
+          </div>
+        )}
       </div>
 
       {isLoading ? (
@@ -114,6 +151,26 @@ export default function MonthlyTab() {
               <div className="text-sm font-medium opacity-90">Total Usage</div>
               <div className="text-3xl font-bold mt-2">{formatBytes(totalUsage)}</div>
             </div>
+          </div>
+
+          <div className="bg-white dark:bg-gray-800 p-6 rounded-lg border border-gray-200 dark:border-gray-700">
+            <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100 mb-4">
+              Daily Usage Trend
+            </h3>
+            <ResponsiveContainer width="100%" height={250}>
+              <LineChart data={trendData} margin={{ top: 5, right: 20, left: 0, bottom: 5 }}>
+                <CartesianGrid strokeDasharray="3 3" />
+                <XAxis dataKey="day" minTickGap={20} stroke="#9ca3af" />
+                <YAxis tickFormatter={(v: number) => formatBytes(v)} width={70} stroke="#9ca3af" />
+                <Tooltip
+                  formatter={(value) => typeof value === 'number' ? formatBytes(value) : String(value)}
+                  labelFormatter={(label) => `Day ${label}`}
+                />
+                <Legend />
+                <Line type="monotone" dataKey="sent" name="Sent" stroke="#3b82f6" strokeWidth={2} dot={false} />
+                <Line type="monotone" dataKey="recv" name="Received" stroke="#10b981" strokeWidth={2} dot={false} />
+              </LineChart>
+            </ResponsiveContainer>
           </div>
 
           <div className="bg-white dark:bg-gray-800 p-6 rounded-lg border border-gray-200 dark:border-gray-700">
@@ -176,7 +233,7 @@ export default function MonthlyTab() {
                     const procTotal = proc.total_sent + proc.total_recv;
                     const percentage = (procTotal / totalUsage) * 100;
                     return (
-                      <tr key={proc.exe_name} className="hover:bg-gray-50 dark:hover:bg-gray-700 dark:bg-gray-700">
+                      <tr key={proc.exe_name} className="hover:bg-gray-50 dark:hover:bg-gray-700">
                         <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
                           {index + 1}
                         </td>

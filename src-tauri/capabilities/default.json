@@ -1,0 +1,14 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Hanya API yang benar-benar dipakai UI. Custom command aplikasi diizinkan otomatis.",
+  "windows": [
+    "main"
+  ],
+  "permissions": [
+    "dialog:allow-save",
+    "autostart:allow-enable",
+    "autostart:allow-disable",
+    "autostart:allow-is-enabled"
+  ]
+}
